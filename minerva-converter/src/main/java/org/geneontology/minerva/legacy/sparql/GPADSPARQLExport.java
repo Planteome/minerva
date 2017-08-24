@@ -47,6 +47,13 @@ import scala.collection.JavaConverters;
 public class GPADSPARQLExport {
 
 	private static final Logger LOG = Logger.getLogger(GPADSPARQLExport.class);
+
+	private static final String ND = "http://purl.obolibrary.org/obo/ECO_0000307";
+	private static final String MF = "http://purl.obolibrary.org/obo/GO_0003674";
+	private static final String BP = "http://purl.obolibrary.org/obo/GO_0008150";
+	private static final String CC = "http://purl.obolibrary.org/obo/GO_0005575";
+	private static final Set<String> rootTerms = new HashSet<>(Arrays.asList(MF, BP, CC));
+	
 	private static String mainQuery;
 	static {
 		try {
@@ -100,14 +107,13 @@ public class GPADSPARQLExport {
 		Set<AnnotationExtension> possibleExtensions = possibleExtensions(basicAnnotations, model);
 		Set<Triple> statementsToExplain = new HashSet<>();
 		basicAnnotations.forEach(ba -> statementsToExplain.add(Triple.create(ba.getObjectNode(), NodeFactory.createURI(ba.getQualifier().toString()), ba.getOntologyClassNode())));
-		possibleExtensions.forEach(ae -> statementsToExplain.add(ae.getTriple()));
 		Map<Triple, Set<Explanation>> allExplanations = statementsToExplain.stream().collect(Collectors.toMap(Function.identity(), s -> toJava(wm.explain(Bridge.tripleFromJena(s)))));
 		Map<Triple, Set<GPADEvidence>> allEvidences = evidencesForFacts(allExplanations.values().stream().flatMap(es -> es.stream()).flatMap(e -> toJava(e.facts()).stream().map(t -> Bridge.jenaFromTriple(t))).collect(Collectors.toSet()), model, modelID);
 		for (BasicGPADData annotation : basicAnnotations) {
 			for (Explanation explanation : allExplanations.get(Triple.create(annotation.getObjectNode(), NodeFactory.createURI(annotation.getQualifier().toString()), annotation.getOntologyClassNode()))) {
 				Set<Triple> requiredFacts = toJava(explanation.facts()).stream().map(t -> Bridge.jenaFromTriple(t)).collect(Collectors.toSet());
-				// Every statement in the explanation must have at least one evidence
-				if (requiredFacts.stream().allMatch(f -> !(allEvidences.get(f).isEmpty()))) {
+				// Every statement in the explanation must have at least one evidence, unless the statement is a class assertion
+				if (requiredFacts.stream().filter(t -> !t.getPredicate().getURI().equals(RDF.type.getURI())).allMatch(f -> !(allEvidences.get(f).isEmpty()))) {
 					// The evidence used for the annotation must be on an edge to or from the target node
 					Stream<GPADEvidence> annotationEvidences = requiredFacts.stream()
 							.filter(f -> (f.getSubject().equals(annotation.getOntologyClassNode()) || f.getObject().equals(annotation.getOntologyClassNode())))
@@ -118,17 +124,17 @@ public class GPADSPARQLExport {
 						for (AnnotationExtension extension : possibleExtensions) {
 							if (extension.getTriple().getSubject().equals(annotation.getOntologyClassNode()) &&
 									!(extension.getTriple().getObject().equals(annotation.getObjectNode()))) {
-								for (Explanation expl : allExplanations.get(extension.getTriple())) {
-									boolean allFactsOfExplanationHaveRefMatchingAnnotation = toJava(expl.facts()).stream().map(fact -> allEvidences.getOrDefault(Bridge.jenaFromTriple(fact), Collections.emptySet())).allMatch(evidenceSet -> 
-									evidenceSet.stream().anyMatch(ev -> ev.getReference().equals(reference)));
-									if (allFactsOfExplanationHaveRefMatchingAnnotation) {
-										goodExtensions.add(new DefaultConjunctiveExpression(IRI.create(extension.getTriple().getPredicate().getURI()), extension.getValueType()));
-									}
-								}
+								goodExtensions.add(new DefaultConjunctiveExpression(IRI.create(extension.getTriple().getPredicate().getURI()), extension.getValueType()));
 							}
 						}
-						annotations.add(new DefaultGPADData(annotation.getObject(), annotation.getQualifier(), annotation.getOntologyClass(), goodExtensions, 
-								reference, currentEvidence.getEvidence(), currentEvidence.getWithOrFrom(), Optional.empty(), currentEvidence.getDate(), "GO_Noctua", currentEvidence.getAnnotations()));
+						final boolean rootViolation;
+						if (rootTerms.contains(annotation.getOntologyClass().toString())) {
+							rootViolation = !ND.equals(currentEvidence.getEvidence().toString());
+						} else { rootViolation = false; }
+						if (!rootViolation) {
+							annotations.add(new DefaultGPADData(annotation.getObject(), annotation.getQualifier(), annotation.getOntologyClass(), goodExtensions, 
+									reference, currentEvidence.getEvidence(), currentEvidence.getWithOrFrom(), Optional.empty(), currentEvidence.getDate(), "GO_Noctua", currentEvidence.getAnnotations()));	
+						}
 					});
 				}
 			}
@@ -186,7 +192,7 @@ public class GPADSPARQLExport {
 		QueryExecution qe = QueryExecutionFactory.create(query, model);
 		ResultSet results = qe.execSelect();
 		while (results.hasNext()) {
-			QuerySolution result =  results.next();
+			QuerySolution result = results.next();
 			Triple statement = Triple.create(result.getResource("target").asNode(), result.getResource("extension_rel").asNode(), result.getResource("extension").asNode());
 			IRI extensionType = IRI.create(result.getResource("extension_type").getURI());
 			possibleExtensions.add(new AnnotationExtension(statement, extensionType));
